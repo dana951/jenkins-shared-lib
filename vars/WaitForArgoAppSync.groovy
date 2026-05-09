@@ -1,72 +1,80 @@
 /**
- * Wait until an ArgoCD Application is Healthy.
+ * Required:
+ * - parentAppName (e.g. env.ARGOCD_MAIN_APP_NAME)
+ * - appName       (e.g. env.ARGOCD_APP_NAME)
+ * - argocdServer  (e.g. env.ARGOCD_SERVER)
+ * - credentialsId (Jenkins secret id for the Argo CD token, e.g. 'argocd-token')
  *
- * Required args:
- * - appName: ArgoCD Application name
- * - namespace: Namespace where the ArgoCD Application CRD lives
- *
- * Optional args:
- * - expectedImageTag: if set, also wait until deployed images contain this tag
- * - timeoutSeconds: Max wait time in seconds (default: 300)
- * - pollSeconds: Poll interval in seconds (default: 10)
+ * Optional (defaults):
+ * - argocdAppGetTimeoutSeconds   — timeout for waitUntil / argocd app get polling (default: 300 seconds)
+ * - insecure                     — when true, passes --insecure to argocd (default: false)
+ * - argocdAppWaitTimeoutSeconds  — argocd app wait --timeout (default: 300 seconds)
  */
 def call(Map args) {
-    ['appName', 'namespace'].each { key ->
-        if (!args[key]) {
-            error("WaitForArgoApp: missing required parameter '${key}'")
+    ['parentAppName', 'appName', 'argocdServer', 'credentialsId'].each { key ->
+        if (!args.containsKey(key)) {
+            error("WaitForArgoAppSync: missing required parameter '${key}'")
         }
     }
 
-    def appName = args.appName
-    def namespace = args.namespace
-    def expectedImageTag = args.expectedImageTag
-    def timeoutSeconds = (args.timeoutSeconds ?: 300) as Integer
-    def pollSeconds = (args.pollSeconds ?: 10) as Integer
+    if (args.containsKey('insecure') && !(args.insecure instanceof Boolean)) {
+        error('WaitForArgoAppSync: insecure must be a Boolean when provided')
+    }
 
-    def deadline = System.currentTimeMillis() + (timeoutSeconds * 1000L)
-    def ready = false
+    def parentAppName = args.parentAppName.toString().trim()
+    def appName = args.appName.toString().trim()
+    def argocdServer = args.argocdServer.toString().trim()
+    def credentialsId = args.credentialsId.toString().trim()
+    def insecure = args.containsKey('insecure') ? args.insecure : false
+    def argocdAppGetTimeoutSeconds = (args.argocdAppGetTimeoutSeconds != null)
+        ? (args.argocdAppGetTimeoutSeconds as Integer)
+        : 300
+    def argocdAppWaitTimeoutSeconds = (args.argocdAppWaitTimeoutSeconds != null)
+        ? (args.argocdAppWaitTimeoutSeconds as Integer)
+        : 300
 
-    while (System.currentTimeMillis() < deadline && !ready) {
-        def health = sh(
-            script: "kubectl get application ${appName} -n ${namespace} -o jsonpath='{.status.health.status}' 2>/dev/null || true",
-            returnStdout: true
-        ).trim()
+    if (!parentAppName || !appName || !argocdServer || !credentialsId) {
+        error('WaitForArgoAppSync: parentAppName, appName, argocdServer, and credentialsId must be non-empty')
+    }
 
-        if (expectedImageTag) {
-            def deployed = sh(
-                script: "kubectl get application ${appName} -n ${namespace} -o jsonpath='{.status.summary.images}' 2>/dev/null || true",
-                returnStdout: true
-            ).trim()
-            echo "ArgoCD ${appName} health.status=${health}"
-            echo "Deployed images: ${deployed}"
-            if (health == 'Healthy' && deployed.contains(expectedImageTag)) {
-                ready = true
-            } else if (health == 'Healthy') {
-                echo "ArgoCD is Healthy but deployed image does not match ${expectedImageTag}"
-                sleep(pollSeconds)
-            } else {
-                sleep(pollSeconds)
+    def insecureFlag = insecure ? ' --insecure' : ''
+
+    withCredentials([string(credentialsId: credentialsId, variable: 'ARGO_TOKEN')]) {
+        echo "Syncing Parent App: ${parentAppName}"
+        sh """
+            set -eu
+            argocd app sync '${parentAppName}' \\
+                --auth-token "\$ARGO_TOKEN" \\
+                --server '${argocdServer}'${insecureFlag}
+        """.stripIndent().trim()
+
+        echo "Waiting for Application '${appName}' to appear..."
+        timeout(time: argocdAppGetTimeoutSeconds, unit: 'SECONDS') {
+            waitUntil {
+                def appExists = sh(
+                    script: """
+                        set -eu
+                        argocd app get '${appName}' \\
+                            --auth-token "\$ARGO_TOKEN" \\
+                            --server '${argocdServer}'${insecureFlag}
+                    """.stripIndent().trim(),
+                    returnStatus: true
+                )
+                return (appExists == 0)
             }
-        } else {
-            echo "ArgoCD Application ${appName} health.status: '${health}'"
-            if (health == 'Healthy') {
-                ready = true
-            } else {
-                sleep(pollSeconds)
-            }
         }
-    }
 
-    if (!ready) {
-        if (expectedImageTag) {
-            error("Application ${appName} did not become Healthy with image containing ${expectedImageTag} within ${timeoutSeconds}s")
-        }
-        error("Application ${appName} did not become Healthy within ${timeoutSeconds}s")
-    }
+        echo "Application '${appName}' created! Waiting for deployment to complete..."
+        sh """
+            set -eu
+            argocd app wait '${appName}' \\
+                --auth-token "\$ARGO_TOKEN" \\
+                --server '${argocdServer}'${insecureFlag} \\
+                --sync \\
+                --health \\
+                --timeout ${argocdAppWaitTimeoutSeconds}
+        """.stripIndent().trim()
 
-    if (expectedImageTag) {
-        echo "✅ ArgoCD Application ${appName} is Healthy with image tag ${expectedImageTag}"
-    } else {
-        echo "✅ ArgoCD Application ${appName} is Healthy"
+        echo "Deployment of ${appName} is successful and healthy."
     }
 }
