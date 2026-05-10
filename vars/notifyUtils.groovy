@@ -19,6 +19,12 @@ def call(Map args) {
     def color = args.color ?: 'good'
     def tokenCredentialId = args.tokenCredentialId ?: 'slack-webhook-url'
 
+   
+    echo "notifyUtils: sending Slack notification to ${channel} with color ${color}"
+    echo "notifyUtils: message: ${message}"
+
+     // ToDo - install Slack Notification Plugin
+
     slackSend(
         channel: channel,
         color: color,
