@@ -13,12 +13,12 @@
 def call(Map args) {
     ['parentAppName', 'appName', 'argocdServer', 'credentialsId'].each { key ->
         if (!args.containsKey(key)) {
-            error("WaitForArgoAppSync: missing required parameter '${key}'")
+            error("waitForArgoCDSync: missing required parameter '${key}'")
         }
     }
 
     if (args.containsKey('insecure') && !(args.insecure instanceof Boolean)) {
-        error('WaitForArgoAppSync: insecure must be a Boolean when provided')
+        error('waitForArgoCDSync: insecure must be a Boolean when provided')
     }
 
     def parentAppName = args.parentAppName.toString().trim()
@@ -34,7 +34,7 @@ def call(Map args) {
         : 300
 
     if (!parentAppName || !appName || !argocdServer || !credentialsId) {
-        error('WaitForArgoAppSync: parentAppName, appName, argocdServer, and credentialsId must be non-empty')
+        error('waitForArgoCDSync: parentAppName, appName, argocdServer, and credentialsId must be non-empty')
     }
 
     def insecureFlag = insecure ? ' --insecure' : ''
@@ -60,6 +60,9 @@ def call(Map args) {
                     """.stripIndent().trim(),
                     returnStatus: true
                 )
+                if (appExists != 0) {
+                    sleep(time: 10, unit: 'SECONDS')
+                }
                 return (appExists == 0)
             }
         }
